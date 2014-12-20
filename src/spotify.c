@@ -90,6 +90,12 @@ struct artwork_get_param
   int max_h;
 };
 
+struct login_param
+{
+  char *username;
+  char *password;
+};
+
 struct spotify_command;
 
 typedef int (*cmd_func)(struct spotify_command *cmd);
@@ -110,6 +116,7 @@ struct spotify_command
     int seek_ms;
     struct audio_get_param audio;
     struct artwork_get_param artwork;
+    struct login_param login;
   } arg;
 
   int ret;
@@ -783,6 +790,27 @@ static sp_playlistcontainer_callbacks pc_callbacks = {
 
 /* --------------------- INTERNAL PLAYBACK AND AUDIO ----------------------- */
 /*            Should only be called from within the spotify thread           */
+
+static int
+login(struct spotify_command *cmd)
+{
+  sp_error err;
+
+  DPRINTF(E_INFO, L_SPOTIFY, "Logging into Spotify\n");
+
+  if (cmd->arg.login.username)
+    err = fptr_sp_session_login(g_sess, cmd->arg.login.username, cmd->arg.login.password, 1, NULL);
+  else
+    err = fptr_sp_session_relogin(g_sess);
+
+  if (SP_ERROR_OK != err)
+    {
+      DPRINTF(E_LOG, L_SPOTIFY, "Could not login into Spotify: %s\n", fptr_sp_error_message(err));
+      return -1;
+    }
+
+  return 0;
+}
 
 static void
 audio_fifo_flush(void)
@@ -1765,10 +1793,13 @@ spotify_file_read(char *path, char **username, char **password)
 void
 spotify_login(char *path)
 {
+  struct spotify_command cmd;
   char *username;
   char *password;
   int ret;
-  sp_error err;
+
+  username = NULL;
+  password = NULL;
 
   if (!g_sess)
     {
@@ -1791,38 +1822,40 @@ spotify_login(char *path)
 	}
     }
 
-  /* Log in */
+  /* Stop here if the .spotify file is garbage. Note, path is null on re-login */
   if (path)
     {
       ret = spotify_file_read(path, &username, &password);
       if (ret < 0)
 	return;
-
-      DPRINTF(E_INFO, L_SPOTIFY, "Logging into Spotify\n");
-      err = fptr_sp_session_login(g_sess, username, password, 1, NULL);
-    }
-  else
-    {
-      DPRINTF(E_INFO, L_SPOTIFY, "Logging into Spotify\n");
-      err = fptr_sp_session_relogin(g_sess);
     }
 
-  if (SP_ERROR_OK != err)
-    {
-      DPRINTF(E_LOG, L_SPOTIFY, "Could not login into Spotify: %s\n", fptr_sp_error_message(err));
-      return;
-    }
-
-  /* Spawn thread */
+  /* Spawn new thread and ask the thread to log in */
   ret = pthread_create(&tid_spotify, NULL, spotify, NULL);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Could not spawn Spotify thread: %s\n", strerror(errno));
-
       return;
     }
-}
 
+  command_init(&cmd);
+
+  cmd.func = login;
+  cmd.arg.login.username = username;
+  cmd.arg.login.password = password;
+
+  ret = sync_command(&cmd);
+
+  command_deinit(&cmd);
+
+  if (ret < 0)
+    thread_exit();
+
+  if (username)
+    free(username);
+  if (password)
+    free(password);
+}
 
 /* Thread: main */
 int
